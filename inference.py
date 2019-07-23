@@ -8,6 +8,8 @@ import argparse
 import os
 import sys
 
+import cv2
+import numpy as np
 import tensorflow as tf
 
 import deeplab_model
@@ -50,51 +52,75 @@ _NUM_CLASSES = 21
 
 
 def main(unused_argv):
-  # Using the Winograd non-fused algorithms provides a small performance boost.
-  os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
+    # Using the Winograd non-fused algorithms provides a small performance boost.
+    os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
 
-  pred_hooks = None
-  if FLAGS.debug:
-    debug_hook = tf_debug.LocalCLIDebugHook()
-    pred_hooks = [debug_hook]
+    pred_hooks = None
+    if FLAGS.debug:
+        debug_hook = tf_debug.LocalCLIDebugHook()
+        pred_hooks = [debug_hook]
 
-  model = tf.estimator.Estimator(
-      model_fn=deeplab_model.deeplabv3_model_fn,
-      model_dir=FLAGS.model_dir,
-      params={
-          'output_stride': FLAGS.output_stride,
-          'batch_size': 1,  # Batch size must be 1 because the images' size may differ
-          'base_architecture': FLAGS.base_architecture,
-          'pre_trained_model': None,
-          'batch_norm_decay': None,
-          'num_classes': _NUM_CLASSES,
-      })
+    model = tf.estimator.Estimator(
+        model_fn=deeplab_model.deeplabv3_model_fn,
+        model_dir=FLAGS.model_dir,
+        params={
+            'output_stride': FLAGS.output_stride,
+            'batch_size': 1,  # Batch size must be 1 because the images' size may differ
+            'base_architecture': FLAGS.base_architecture,
+            'pre_trained_model': None,
+            'batch_norm_decay': None,
+            'num_classes': _NUM_CLASSES,
+        })
 
-  examples = dataset_util.read_examples_list(FLAGS.infer_data_list)
-  image_files = [os.path.join(FLAGS.data_dir, filename) for filename in examples]
+    examples = dataset_util.read_examples_list(FLAGS.infer_data_list)
+    image_files = [os.path.join(FLAGS.data_dir, filename) for filename in examples]
 
-  predictions = model.predict(
+    predictions = model.predict(
         input_fn=lambda: preprocessing.eval_input_fn(image_files),
         hooks=pred_hooks)
 
-  output_dir = FLAGS.output_dir
-  if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
+    output_dir = FLAGS.output_dir
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-  for pred_dict, image_path in zip(predictions, image_files):
-    image_basename = os.path.splitext(os.path.basename(image_path))[0]
-    output_filename = image_basename + '_mask.png'
-    path_to_output = os.path.join(output_dir, output_filename)
+    for pred_dict, image_path in zip(predictions, image_files):
+        image_basename = os.path.splitext(os.path.basename(image_path))[0]
+        output_filename = image_basename + '_mask.png'
+        path_to_output = os.path.join(output_dir, output_filename)
 
-    print("generating:", path_to_output)
-    mask = pred_dict['decoded_labels']
-    mask = Image.fromarray(mask)
-    plt.axis('off')
-    plt.imshow(mask)
-    plt.savefig(path_to_output, bbox_inches='tight')
+        print("generating:", path_to_output)
+        mask = pred_dict['decoded_labels']
+        mask = Image.fromarray(mask)
+
+        value = 100
+
+        orig_im = cv2.imread(image_path)
+
+        avg = np.average(orig_im)
+        avg = 100 if avg > 100 else avg
+        # value = int(avg * 5/6)
+
+        mask = np.array(mask)
+        im_rgb = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
+
+        orig_im = orig_im.astype(dtype=np.int) - 1.5 * np.ones(shape=orig_im.shape, dtype=np.int) * avg
+
+        seg_mask = 1.5 * np.where(im_rgb == [192, 128, 128], 1, 0).astype(dtype=np.int) * avg
+        seg_mask = seg_mask + np.where(im_rgb == [192, 128, 128], 1, 0).astype(dtype=np.int) * value
+        seg_dim = seg_mask[:, :, 1]
+        orig_im = orig_im + np.stack([seg_dim, seg_dim, seg_dim], axis=-1)
+
+        orig_im[orig_im < 0] = 0
+        orig_im[orig_im > 255] = 255
+
+        orig_im = orig_im.astype(dtype=np.uint8)
+
+        # cv2.imshow("mask", orig_im)
+        # cv2.waitKey(0)
+        cv2.imwrite(path_to_output, orig_im)
 
 
 if __name__ == '__main__':
-  tf.logging.set_verbosity(tf.logging.INFO)
-  FLAGS, unparsed = parser.parse_known_args()
-  tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
+    tf.logging.set_verbosity(tf.logging.INFO)
+    FLAGS, unparsed = parser.parse_known_args()
+    tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
